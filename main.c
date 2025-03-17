@@ -7,7 +7,7 @@
 
 // Compilation flags
 // Uncomment to enable debug prints and delays
-#define DEBUG_MODE
+// #define DEBUG_MODE
 
 // Constants (parameterizable at compilation level)
 #define NUM_CLASSES 5
@@ -300,6 +300,7 @@ void* student_function(void* arg) {
     students_in_school--;
     debug_print("Student %d has completed all required lessons and is leaving. Students remaining: %d\n",
                student_id, students_in_school);
+    pthread_mutex_unlock(&school_mutex);
 
     // Signal all teachers that a student has left (might trigger special condition)
     for (int i = 0; i < NUM_CLASSES; i++) {
@@ -307,8 +308,6 @@ void* student_function(void* arg) {
         pthread_cond_signal(&classrooms[i].lesson_start_cv);
         pthread_mutex_unlock(&classrooms[i].mutex);
     }
-
-    pthread_mutex_unlock(&school_mutex);
 
     return NULL;
 }
