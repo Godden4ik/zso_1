@@ -157,6 +157,7 @@ void* teacher_function(void* arg) {
         // Conduct the lesson
         debug_sleep(LESSON_DURATION);
 
+
         // End the lesson
         pthread_mutex_lock(&classrooms[classroom_id].mutex);
         classrooms[classroom_id].state = LESSON_ENDED;
@@ -173,6 +174,7 @@ void* teacher_function(void* arg) {
 
         // Short break between lessons
         debug_sleep(1);
+        sched_yield();  // Add this line to give other threads a chance to run
 
         // Reset the classroom for the next lesson
         pthread_mutex_lock(&classrooms[classroom_id].mutex);
@@ -236,7 +238,7 @@ void* student_function(void* arg) {
                     }
                 }
 
-                if (!already_attended) {
+                if (!classrooms[i].students_inside[student_id]) {
                     // Join this classroom
                     classrooms[i].students_count++;
                     classrooms[i].students_inside[student_id] = 1;
@@ -246,9 +248,10 @@ void* student_function(void* arg) {
                     debug_print("Student %d joined classroom %d. Student count: %d\n",
                                student_id, i, classrooms[i].students_count);
 
-                    // Signal teacher if enough students have arrived
+                    // Signal teacher if enough students have arrived, or we're about to end
+                    // Important: Signal under the mutex to ensure the teacher doesn't miss it
                     if (classrooms[i].students_count >= MIN_STUDENTS_FOR_LESSON) {
-                        pthread_cond_signal(&classrooms[i].lesson_start_cv);
+                        pthread_cond_broadcast(&classrooms[i].lesson_start_cv);
                     }
 
                     pthread_mutex_unlock(&classrooms[i].mutex);
@@ -263,6 +266,7 @@ void* student_function(void* arg) {
             // Wait briefly before trying again
             debug_print("Student %d couldn't find an available classroom. Waiting...\n", student_id);
             debug_sleep(1);
+            sched_yield();  // Add this line to give other threads a chance to run
             continue;
         }
 
