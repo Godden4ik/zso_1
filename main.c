@@ -7,7 +7,7 @@
 
 // Compilation flags
 // Uncomment to enable debug prints and delays
-// #define DEBUG_MODE
+#define DEBUG_MODE
 
 // Constants (parameterizable at compilation level)
 #define NUM_CLASSES 5
