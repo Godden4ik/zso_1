@@ -201,6 +201,18 @@ void* student_function(void* arg) {
     int lessons_attended = 0;
 
     while (lessons_attended < REQUIRED_LESSONS) {
+        // Check if any teachers are left in the school
+        pthread_mutex_lock(&school_mutex);
+        if (remaining_teachers == 0) {
+            // No teachers left, student should leave
+            students_in_school--;
+            debug_print("Student %d is leaving because no teachers remain. Lessons attended: %d/%d\n",
+                      student_id, lessons_attended, REQUIRED_LESSONS);
+            pthread_mutex_unlock(&school_mutex);
+            return NULL;
+        }
+        pthread_mutex_unlock(&school_mutex);
+
         bool found_classroom = false;
         int chosen_classroom = -1;
 
@@ -328,12 +340,44 @@ int main() {
         pthread_join(student_threads[i], NULL);
     }
 
+    // Count completed lessons
+    int students_completed = 0;
+    int teachers_completed = 0;
+
+    for (int i = 0; i < TOTAL_STUDENTS; i++) {
+        if (student_lessons_attended[i] == REQUIRED_LESSONS) {
+            students_completed++;
+        }
+    }
+
+    for (int i = 0; i < NUM_TEACHERS; i++) {
+        if (teacher_lessons_taught[i] == REQUIRED_LESSONS) {
+            teachers_completed++;
+        }
+    }
+
     // Clean up
     cleanup_resources();
 
-    // Print summary
+    // Print detailed summary
     debug_print("\n===== Simulation Summary =====\n");
-    debug_print("All students and teachers have completed their required lessons.\n");
+    debug_print("Students who completed all lessons: %d/%d (%.1f%%)\n",
+               students_completed, TOTAL_STUDENTS,
+               (float)students_completed/TOTAL_STUDENTS * 100);
+    debug_print("Teachers who completed all lessons: %d/%d (%.1f%%)\n",
+               teachers_completed, NUM_TEACHERS,
+               (float)teachers_completed/NUM_TEACHERS * 100);
+
+    // Print details about lessons per student
+    debug_print("\nLesson attendance distribution:\n");
+    int attendance_count[REQUIRED_LESSONS + 1] = {0}; // Count for 0, 1, 2, 3 lessons
+    for (int i = 0; i < TOTAL_STUDENTS; i++) {
+        attendance_count[student_lessons_attended[i]]++;
+    }
+
+    for (int i = 0; i <= REQUIRED_LESSONS; i++) {
+        debug_print("  Students who attended %d lessons: %d\n", i, attendance_count[i]);
+    }
 
     return 0;
 }
