@@ -6,8 +6,11 @@
 #include <stdbool.h>
 
 // Compilation flags
-// Uncomment to enable debug prints and delays
-#define DEBUG_MODE
+// Uncomment to enable debug prints
+#define DEBUG_PRINT
+
+// Uncomment to enable debug delays
+// #define DEBUG_SLEEP
 
 // Constants (parameterizable at compilation level)
 #define NUM_CLASSES 5
@@ -16,7 +19,7 @@
 #define MIN_STUDENTS_FOR_LESSON 10
 #define NUM_TEACHERS NUM_CLASSES
 #define REQUIRED_LESSONS 3
-#define LESSON_DURATION 3  // in seconds, only used in DEBUG_MODE
+#define LESSON_DURATION 3  // in seconds, only used when DEBUG_SLEEP is defined
 
 // Classroom/Lesson states
 #define LESSON_WAITING 0
@@ -49,7 +52,7 @@ int teacher_lesson_history[NUM_TEACHERS][REQUIRED_LESSONS] = {{-1}};
 
 // Helper function to print debug messages
 void debug_print(const char* format, ...) {
-#ifdef DEBUG_MODE
+#ifdef DEBUG_PRINT
     va_list args;
     va_start(args, format);
     vprintf(format, args);
@@ -59,7 +62,7 @@ void debug_print(const char* format, ...) {
 
 // Helper function to introduce delays
 void debug_sleep(int seconds) {
-#ifdef DEBUG_MODE
+#ifdef DEBUG_SLEEP
     sleep(seconds);
 #endif
 }
@@ -268,8 +271,9 @@ void* student_function(void* arg) {
 
         // Wait if the lesson hasn't started yet
         while (classrooms[chosen_classroom].state == LESSON_WAITING) {
-            debug_print("Student %d waiting for lesson to start in classroom %d.\n",
+            debug_print("Student %d waiting for lesson to start in classroom %d. ",
                        student_id, chosen_classroom);
+            debug_print("Amount of students in the class waiting: %d \n", classrooms[chosen_classroom].students_count);
             pthread_cond_wait(&classrooms[chosen_classroom].lesson_start_cv,
                              &classrooms[chosen_classroom].mutex);
         }
