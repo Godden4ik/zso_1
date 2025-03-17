@@ -303,7 +303,9 @@ void* student_function(void* arg) {
 
     // Signal all teachers that a student has left (might trigger special condition)
     for (int i = 0; i < NUM_CLASSES; i++) {
+        pthread_mutex_lock(&classrooms[i].mutex);
         pthread_cond_signal(&classrooms[i].lesson_start_cv);
+        pthread_mutex_unlock(&classrooms[i].mutex);
     }
 
     pthread_mutex_unlock(&school_mutex);
