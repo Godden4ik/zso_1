@@ -129,8 +129,7 @@ void* teacher_function(void* arg) {
         while (classrooms[classroom_id].students_count < MIN_STUDENTS_FOR_LESSON) {
             pthread_mutex_lock(&school_mutex);
             // Special condition: start with fewer students if not enough in school
-            if (!enough_students_for_regular_lesson() &&
-                classrooms[classroom_id].students_count > 0) {
+            if (!enough_students_for_regular_lesson()) {
                 start_with_fewer = true;
                 pthread_mutex_unlock(&school_mutex);
                 break;
@@ -230,13 +229,13 @@ void* student_function(void* arg) {
                 !classrooms[i].students_inside[student_id]) {
 
                 // Check if we've already attended this classroom in the past
-                bool already_attended = false;
-                for (int j = 0; j < lessons_attended; j++) {
-                    if (student_lesson_history[student_id][j] == i) {
-                        already_attended = true;
-                        break;
-                    }
-                }
+                // bool already_attended = false;
+                // for (int j = 0; j < lessons_attended; j++) {
+                //     if (student_lesson_history[student_id][j] == i) {
+                //         already_attended = true;
+                //         break;
+                //     }
+                // }
 
                 if (!classrooms[i].students_inside[student_id]) {
                     // Join this classroom
@@ -277,7 +276,8 @@ void* student_function(void* arg) {
         while (classrooms[chosen_classroom].state == LESSON_WAITING) {
             debug_print("Student %d waiting for lesson to start in classroom %d. ",
                        student_id, chosen_classroom);
-            debug_print("Amount of students in the class waiting: %d \n", classrooms[chosen_classroom].students_count);
+            debug_print("Amount of students in the class waiting: %d ", classrooms[chosen_classroom].students_count);
+            debug_print("Total amount of students in the school: %d \n", students_in_school);
             pthread_cond_wait(&classrooms[chosen_classroom].lesson_start_cv,
                              &classrooms[chosen_classroom].mutex);
         }
