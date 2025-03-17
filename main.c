@@ -147,6 +147,8 @@ void* teacher_function(void* arg) {
                    teacher_id, classroom_id, classrooms[classroom_id].students_count,
                    start_with_fewer ? " (fewer than required)" : "");
 
+        // Signal all students that the lesson has started
+        pthread_cond_broadcast(&classrooms[classroom_id].lesson_start_cv);
         pthread_mutex_unlock(&classrooms[classroom_id].mutex);
 
         // Conduct the lesson
