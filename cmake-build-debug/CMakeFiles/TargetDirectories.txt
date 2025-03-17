@@ -1,0 +1,3 @@
+/Users/godden4ik/CLionProjects/ZSO_1/cmake-build-debug/CMakeFiles/ZSO_1.dir
+/Users/godden4ik/CLionProjects/ZSO_1/cmake-build-debug/CMakeFiles/edit_cache.dir
+/Users/godden4ik/CLionProjects/ZSO_1/cmake-build-debug/CMakeFiles/rebuild_cache.dir
