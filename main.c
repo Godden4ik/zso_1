@@ -63,6 +63,9 @@ int students_in_school = TOTAL_STUDENTS;
 int remaining_teachers = NUM_TEACHERS;
 pthread_mutex_t school_mutex;
 
+// Add a school-wide condition variable to signal state changes
+pthread_cond_t school_cond;
+
 // Student and teacher tracking
 int student_lessons_attended[TOTAL_STUDENTS] = {0};
 int teacher_lessons_taught[NUM_TEACHERS] = {0};
@@ -137,6 +140,8 @@ void initialize_classrooms() {
 
     CHECK_PTHREAD_RETURN(pthread_mutex_init(&school_mutex, NULL),
                         "School mutex initialization");
+    CHECK_PTHREAD_RETURN(pthread_cond_init(&school_cond, NULL),
+                        "School condition variable initialization");
 }
 
 // Clean up resources
@@ -152,6 +157,8 @@ void cleanup_resources() {
 
     CHECK_PTHREAD_RETURN(pthread_mutex_destroy(&school_mutex),
                         "School mutex destruction");
+    CHECK_PTHREAD_RETURN(pthread_cond_destroy(&school_cond),
+                        "School condition variable destruction");
 }
 
 // Check if there are enough students left in school for a regular lesson
@@ -185,6 +192,21 @@ void* teacher_function(void* arg) {
         log_message(LOG_INFO, "Teacher %d preparing for lesson %d in classroom %d.\n",
                    teacher_id, lessons_taught + 1, classroom_id);
 
+        // First check if we should start with fewer students
+        bool start_with_fewer = false;
+
+        CHECK_PTHREAD_RETURN(pthread_mutex_lock(&school_mutex),
+                            "Teacher: school mutex lock");
+
+        // Check and update school state
+        start_with_fewer = (students_in_school < MIN_STUDENTS_FOR_LESSON);
+
+        // Signal any waiting students that a teacher is about to start a lesson
+        pthread_cond_broadcast(&school_cond);
+
+        CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
+                            "Teacher: school mutex unlock");
+
         CHECK_PTHREAD_RETURN(pthread_mutex_lock(&classrooms[classroom_id].mutex),
                             "Teacher: classroom mutex lock");
 
@@ -192,32 +214,40 @@ void* teacher_function(void* arg) {
         classrooms[classroom_id].teacher_id = teacher_id;
         classrooms[classroom_id].state = LESSON_WAITING;
 
-        // Wait for enough students or special condition
-        bool start_with_fewer = false;
+        if (!start_with_fewer) {
+            // Regular case: wait for enough students
+            while (classrooms[classroom_id].students_count < MIN_STUDENTS_FOR_LESSON) {
+                // Before waiting, check again if we should start with fewer
+                CHECK_PTHREAD_RETURN(pthread_mutex_lock(&school_mutex),
+                                   "Teacher: school mutex lock in wait loop");
 
-        while (classrooms[classroom_id].students_count < MIN_STUDENTS_FOR_LESSON) {
-            // Acquire school_mutex to check students_in_school safely
-            CHECK_PTHREAD_RETURN(pthread_mutex_lock(&school_mutex),
-                                "Teacher: school mutex lock");
+                start_with_fewer = (students_in_school < MIN_STUDENTS_FOR_LESSON);
 
-            // Special condition: start with fewer students if not enough in school
-            if (!enough_students_for_regular_lesson()) {
-                start_with_fewer = true;
                 CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
-                                    "Teacher: school mutex unlock (special cond)");
-                break;
+                                   "Teacher: school mutex unlock in wait loop");
+
+                if (start_with_fewer) {
+                    break;  // Start with fewer students
+                }
+
+                log_message(LOG_DEBUG, "Teacher %d waiting for students. Current count: %d\n",
+                           teacher_id, classrooms[classroom_id].students_count);
+
+                // Temporarily release the classroom lock and wait for students
+                CHECK_PTHREAD_RETURN(pthread_cond_wait(&classrooms[classroom_id].lesson_start_cv,
+                                                    &classrooms[classroom_id].mutex),
+                                    "Teacher: waiting for students");
+
+                // We woke up - check if conditions have changed
+                // Signal other waiting students/teachers
+                CHECK_PTHREAD_RETURN(pthread_mutex_lock(&school_mutex),
+                                   "Teacher: school mutex lock after wait");
+
+                pthread_cond_broadcast(&school_cond);
+
+                CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
+                                   "Teacher: school mutex unlock after wait");
             }
-
-            CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
-                                "Teacher: school mutex unlock");
-
-            // Wait for more students
-            log_message(LOG_DEBUG, "Teacher %d waiting for students. Current count: %d\n",
-                      teacher_id, classrooms[classroom_id].students_count);
-
-            CHECK_PTHREAD_RETURN(pthread_cond_wait(&classrooms[classroom_id].lesson_start_cv,
-                                &classrooms[classroom_id].mutex),
-                                "Teacher: waiting for students");
         }
 
         // Start the lesson
@@ -256,10 +286,6 @@ void* teacher_function(void* arg) {
         CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&classrooms[classroom_id].mutex),
                             "Teacher: classroom mutex unlock after ending");
 
-        // Short break between lessons
-        debug_sleep(1);
-        sched_yield();  // Give other threads a chance to run
-
         // Reset the classroom for the next lesson
         CHECK_PTHREAD_RETURN(pthread_mutex_lock(&classrooms[classroom_id].mutex),
                             "Teacher: classroom mutex lock for reset");
@@ -272,6 +298,15 @@ void* teacher_function(void* arg) {
 
         CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&classrooms[classroom_id].mutex),
                             "Teacher: classroom mutex unlock after reset");
+
+        // Notify waiting students that a classroom is available
+        CHECK_PTHREAD_RETURN(pthread_mutex_lock(&school_mutex),
+                           "Teacher: school mutex lock after reset");
+
+        pthread_cond_broadcast(&school_cond);
+
+        CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
+                           "Teacher: school mutex unlock after reset");
     }
 
     // Teacher has taught required number of lessons
@@ -281,6 +316,9 @@ void* teacher_function(void* arg) {
     remaining_teachers--;
     log_message(LOG_INFO, "Teacher %d has completed all required lessons and is leaving. Teachers remaining: %d\n",
                teacher_id, remaining_teachers);
+
+    // Signal any waiting students that teacher count has changed
+    pthread_cond_broadcast(&school_cond);
 
     CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
                         "Teacher: school mutex unlock after exit");
@@ -308,12 +346,14 @@ void* student_function(void* arg) {
             log_message(LOG_INFO, "Student %d is leaving because no teachers remain. Lessons attended: %d/%d\n",
                       student_id, lessons_attended, REQUIRED_LESSONS);
 
+            // Signal teachers about student count change
+            pthread_cond_broadcast(&school_cond);
+
             CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
                                 "Student: school mutex unlock (no teachers)");
             return NULL;
         }
 
-        // We're done with school_mutex for now
         CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
                             "Student: school mutex unlock");
 
@@ -321,8 +361,7 @@ void* student_function(void* arg) {
         int chosen_classroom = -1;
 
         // Look for an available classroom in sequential order
-        // Starting from student_id % NUM_CLASSES to distribute students more evenly
-        for (int offset = 0; offset < NUM_CLASSES; offset++) {
+        for (int offset = 0; offset < NUM_CLASSES && !found_classroom; offset++) {
             int i = (student_id + offset) % NUM_CLASSES;
 
             CHECK_PTHREAD_RETURN(pthread_mutex_lock(&classrooms[i].mutex),
@@ -347,25 +386,28 @@ void* student_function(void* arg) {
 
                     // Signal teacher if enough students have arrived
                     if (classrooms[i].students_count >= MIN_STUDENTS_FOR_LESSON) {
-                        CHECK_PTHREAD_RETURN(pthread_cond_broadcast(&classrooms[i].lesson_start_cv),
+                        CHECK_PTHREAD_RETURN(pthread_cond_signal(&classrooms[i].lesson_start_cv),
                                             "Student: signaling lesson start");
                     }
-
-                    CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&classrooms[i].mutex),
-                                        "Student: classroom mutex unlock (joined)");
-                    break;
                 }
             }
 
             CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&classrooms[i].mutex),
-                                "Student: classroom mutex unlock (not joined)");
+                                "Student: classroom mutex unlock");
         }
 
         if (!found_classroom) {
-            // Wait briefly before trying again
-            log_message(LOG_DEBUG, "Student %d couldn't find an available classroom. Waiting...\n", student_id);
-            debug_sleep(1);
-            sched_yield();  // Give other threads a chance to run
+            // If we couldn't find a classroom, we need to wait for a change
+            // Get the school mutex to check and update global state
+            CHECK_PTHREAD_RETURN(pthread_mutex_lock(&school_mutex),
+                                "Student: school mutex lock for wait");
+
+            // Instead of busy waiting, wait on the school condition variable
+            // until there's a change in state that might make a classroom available
+            pthread_cond_wait(&school_cond, &school_mutex);
+
+            CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
+                                "Student: school mutex unlock after wait");
             continue;
         }
 
@@ -375,16 +417,6 @@ void* student_function(void* arg) {
 
         // Wait if the lesson hasn't started yet
         while (classrooms[chosen_classroom].state == LESSON_WAITING) {
-            // Get students_in_school safely for logging
-            int total_students = get_students_in_school();
-
-            log_message(LOG_VERBOSE, "Student %d waiting for lesson to start in classroom %d. "
-                       "Amount of students in the class waiting: %d "
-                       "Total amount of students in the school: %d \n",
-                       student_id, chosen_classroom,
-                       classrooms[chosen_classroom].students_count,
-                       total_students);
-
             CHECK_PTHREAD_RETURN(pthread_cond_wait(&classrooms[chosen_classroom].lesson_start_cv,
                                 &classrooms[chosen_classroom].mutex),
                                 "Student: waiting for lesson to start");
@@ -421,20 +453,11 @@ void* student_function(void* arg) {
     log_message(LOG_INFO, "Student %d has completed all required lessons and is leaving. Students remaining: %d\n",
                student_id, students_in_school);
 
+    // Signal about student count change
+    pthread_cond_broadcast(&school_cond);
+
     CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
                         "Student: school mutex unlock (exit)");
-
-    // Signal all teachers that a student has left (might trigger special condition)
-    for (int i = 0; i < NUM_CLASSES; i++) {
-        CHECK_PTHREAD_RETURN(pthread_mutex_lock(&classrooms[i].mutex),
-                            "Student: classroom mutex lock (signal on exit)");
-
-        CHECK_PTHREAD_RETURN(pthread_cond_signal(&classrooms[i].lesson_start_cv),
-                            "Student: signaling on exit");
-
-        CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&classrooms[i].mutex),
-                            "Student: classroom mutex unlock (signal on exit)");
-    }
 
     return NULL;
 }
