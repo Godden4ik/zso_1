@@ -147,8 +147,20 @@ void cleanup_resources() {
 }
 
 // Check if there are enough students left in school for a regular lesson
+// Caller MUST hold school_mutex before calling this function
 bool enough_students_for_regular_lesson() {
     return students_in_school >= MIN_STUDENTS_FOR_LESSON;
+}
+
+// Helper to get students in school safely
+int get_students_in_school() {
+    int count;
+    CHECK_PTHREAD_RETURN(pthread_mutex_lock(&school_mutex),
+                        "get_students_in_school: lock");
+    count = students_in_school;
+    CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
+                        "get_students_in_school: unlock");
+    return count;
 }
 
 // Teacher thread function
@@ -176,6 +188,7 @@ void* teacher_function(void* arg) {
         bool start_with_fewer = false;
 
         while (classrooms[classroom_id].students_count < MIN_STUDENTS_FOR_LESSON) {
+            // Acquire school_mutex to check students_in_school safely
             CHECK_PTHREAD_RETURN(pthread_mutex_lock(&school_mutex),
                                 "Teacher: school mutex lock");
 
@@ -292,6 +305,7 @@ void* student_function(void* arg) {
             return NULL;
         }
 
+        // We're done with school_mutex for now
         CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
                             "Student: school mutex unlock");
 
@@ -353,12 +367,15 @@ void* student_function(void* arg) {
 
         // Wait if the lesson hasn't started yet
         while (classrooms[chosen_classroom].state == LESSON_WAITING) {
+            // Get students_in_school safely for logging
+            int total_students = get_students_in_school();
+
             log_message(LOG_VERBOSE, "Student %d waiting for lesson to start in classroom %d. "
                        "Amount of students in the class waiting: %d "
                        "Total amount of students in the school: %d \n",
                        student_id, chosen_classroom,
                        classrooms[chosen_classroom].students_count,
-                       students_in_school);
+                       total_students);
 
             CHECK_PTHREAD_RETURN(pthread_cond_wait(&classrooms[chosen_classroom].lesson_start_cv,
                                 &classrooms[chosen_classroom].mutex),
