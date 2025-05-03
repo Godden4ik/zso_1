@@ -76,15 +76,23 @@ void log_message(int level, const char* format, ...) {
         va_list args;
         va_start(args, format);
 
-        // Add timestamp
+        // Add timestamp - use thread-safe version
         time_t now = time(NULL);
-        struct tm *tm_now = localtime(&now);
+        struct tm tm_now_buf;  // Create a local buffer for the time structure
+        struct tm *tm_now = localtime_r(&now, &tm_now_buf);  // Thread-safe version
         char timestamp[32];
         strftime(timestamp, sizeof(timestamp), "[%H:%M:%S] ", tm_now);
+
+        // Lock for printf to ensure atomic console output
+        static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+        pthread_mutex_lock(&log_mutex);
+
         printf("%s", timestamp);
 
         // Print the actual message
         vprintf(format, args);
+
+        pthread_mutex_unlock(&log_mutex);
         va_end(args);
     }
 #endif
