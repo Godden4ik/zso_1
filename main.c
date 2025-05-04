@@ -102,6 +102,7 @@ void debug_sleep(int seconds) {
 
 // Helper function to check if a student has already attended a classroom
 bool student_already_attended_classroom(int student_id, int classroom_id, int lessons_attended) {
+    // IMPORTANT: This function assumes the caller already holds the school_mutex
     for (int i = 0; i < lessons_attended; i++) {
         if (student_lesson_history[student_id][i] == classroom_id) {
             return true;
@@ -214,6 +215,9 @@ void* teacher_function(void* arg) {
 
             while (classrooms[classroom_id].students_count < MIN_STUDENTS_FOR_LESSON) {
                 // Before waiting, check again if we should start with fewer
+                CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&classrooms[classroom_id].mutex),
+                                   "Teacher: temporary classroom mutex unlock for school check");
+
                 CHECK_PTHREAD_RETURN(pthread_mutex_lock(&school_mutex),
                                    "Teacher: school mutex lock in wait loop");
 
@@ -238,6 +242,9 @@ void* teacher_function(void* arg) {
 
                 CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
                                    "Teacher: school mutex unlock in wait loop");
+
+                CHECK_PTHREAD_RETURN(pthread_mutex_lock(&classrooms[classroom_id].mutex),
+                                   "Teacher: re-acquire classroom mutex in wait loop");
 
                 if (start_with_fewer || wait_count >= max_waits) {
                     // Start with fewer students after max timeouts or if conditions changed
@@ -298,6 +305,9 @@ void* teacher_function(void* arg) {
 
                 // We woke up - check if conditions have changed
                 // Signal other waiting students/teachers
+                CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&classrooms[classroom_id].mutex),
+                                   "Teacher: temporary classroom mutex unlock after wait");
+
                 CHECK_PTHREAD_RETURN(pthread_mutex_lock(&school_mutex),
                                    "Teacher: school mutex lock after wait");
 
@@ -305,6 +315,9 @@ void* teacher_function(void* arg) {
 
                 CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
                                    "Teacher: school mutex unlock after wait");
+
+                CHECK_PTHREAD_RETURN(pthread_mutex_lock(&classrooms[classroom_id].mutex),
+                                   "Teacher: re-acquire classroom mutex after wait");
             }
         }
 
@@ -335,17 +348,24 @@ void* teacher_function(void* arg) {
         log_message(LOG_INFO, "Teacher %d ending lesson in classroom %d.\n",
                    teacher_id, classroom_id);
 
-        // Record this lesson
-        teacher_lesson_history[teacher_id][lessons_taught] = classroom_id;
-        lessons_taught++;
-        teacher_lessons_taught[teacher_id] = lessons_taught;
-
         // Signal all students that the lesson has ended
         CHECK_PTHREAD_RETURN(pthread_cond_broadcast(&classrooms[classroom_id].lesson_end_cv),
                             "Teacher: broadcasting lesson end");
 
         CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&classrooms[classroom_id].mutex),
                             "Teacher: classroom mutex unlock after ending");
+
+        // Update teacher lessons taught with school mutex
+        CHECK_PTHREAD_RETURN(pthread_mutex_lock(&school_mutex),
+                            "Teacher: school mutex lock for history update");
+
+        // Record this lesson
+        teacher_lesson_history[teacher_id][lessons_taught] = classroom_id;
+        lessons_taught++;
+        teacher_lessons_taught[teacher_id] = lessons_taught;
+
+        CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
+                            "Teacher: school mutex unlock after history update");
 
         // Reset the classroom for the next lesson
         CHECK_PTHREAD_RETURN(pthread_mutex_lock(&classrooms[classroom_id].mutex),
@@ -425,6 +445,20 @@ void* student_function(void* arg) {
         for (int offset = 0; offset < NUM_CLASSES && !found_classroom; offset++) {
             int i = (student_id + offset) % NUM_CLASSES;
 
+            // First get school mutex to check attendance history
+            CHECK_PTHREAD_RETURN(pthread_mutex_lock(&school_mutex),
+                                "Student: school mutex lock for history check");
+
+            // Check if we've already attended this classroom in the past
+            bool already_attended = student_already_attended_classroom(student_id, i, lessons_attended);
+
+            CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
+                                "Student: school mutex unlock after history check");
+
+            if (already_attended) {
+                continue; // Skip this classroom if already attended
+            }
+
             CHECK_PTHREAD_RETURN(pthread_mutex_lock(&classrooms[i].mutex),
                                 "Student: classroom mutex lock");
 
@@ -432,24 +466,20 @@ void* student_function(void* arg) {
                 classrooms[i].teacher_id != -1 &&
                 !classrooms[i].students_inside[student_id]) {
 
-                // Check if we've already attended this classroom in the past
-                bool already_attended = student_already_attended_classroom(student_id, i, lessons_attended);
+                // Join this classroom
+                classrooms[i].students_count++;
+                classrooms[i].students_inside[student_id] = 1;
+                chosen_classroom = i;
+                found_classroom = true;
 
-                if (!already_attended) {
-                    // Join this classroom
-                    classrooms[i].students_count++;
-                    classrooms[i].students_inside[student_id] = 1;
-                    chosen_classroom = i;
-                    found_classroom = true;
+                log_message(LOG_INFO, "Student %d joined classroom %d. Student count: %d\n",
+                           student_id, i, classrooms[i].students_count);
 
-                    log_message(LOG_INFO, "Student %d joined classroom %d. Student count: %d\n",
-                               student_id, i, classrooms[i].students_count);
-
-                    // Signal teacher if enough students have arrived
-                    if (classrooms[i].students_count >= MIN_STUDENTS_FOR_LESSON) {
-                        CHECK_PTHREAD_RETURN(pthread_cond_signal(&classrooms[i].lesson_start_cv),
-                                            "Student: signaling lesson start");
-                    }
+                // Signal teacher if enough students have arrived
+                // IMPORTANT: We're already holding the classroom mutex here, so this is safe
+                if (classrooms[i].students_count >= MIN_STUDENTS_FOR_LESSON) {
+                    CHECK_PTHREAD_RETURN(pthread_cond_signal(&classrooms[i].lesson_start_cv),
+                                        "Student: signaling lesson start");
                 }
             }
 
@@ -553,16 +583,27 @@ void* student_function(void* arg) {
             }
         }
 
+        // Lesson has ended, store the classroom ID temporarily
+        int completed_classroom = chosen_classroom;
+
+        // Release classroom mutex before getting school mutex to maintain proper locking order
+        CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&classrooms[chosen_classroom].mutex),
+                            "Student: classroom mutex unlock (lesson complete)");
+
+        // Get school mutex to update attendance information
+        CHECK_PTHREAD_RETURN(pthread_mutex_lock(&school_mutex),
+                            "Student: school mutex lock for attendance update");
+
         // Record this lesson
-        student_lesson_history[student_id][lessons_attended] = chosen_classroom;
+        student_lesson_history[student_id][lessons_attended] = completed_classroom;
         lessons_attended++;
         student_lessons_attended[student_id] = lessons_attended;
 
         log_message(LOG_INFO, "Student %d completed lesson in classroom %d. Lessons attended: %d/%d\n",
-                   student_id, chosen_classroom, lessons_attended, REQUIRED_LESSONS);
+                   student_id, completed_classroom, lessons_attended, REQUIRED_LESSONS);
 
-        CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&classrooms[chosen_classroom].mutex),
-                            "Student: classroom mutex unlock (lesson complete)");
+        CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
+                            "Student: school mutex unlock (attendance update)");
     }
 
     // Student has attended required number of lessons
