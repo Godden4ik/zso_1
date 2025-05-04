@@ -10,7 +10,7 @@
 
 // Compilation flags
 // Uncomment to enable debug prints
-#define DEBUG_PRINT
+// #define DEBUG_PRINT
 
 // Uncomment to enable debug delays
 // #define DEBUG_SLEEP
@@ -33,6 +33,7 @@
 #define NUM_TEACHERS NUM_CLASSES
 #define REQUIRED_LESSONS 3
 #define LESSON_DURATION 3  // in seconds, only used when DEBUG_SLEEP is defined
+#define WAIT_TIMEOUT_SEC 0.1 // Timeout for condition variable waits
 
 // Logging levels
 #define LOG_INFO    0
@@ -178,6 +179,7 @@ void* teacher_function(void* arg) {
 
     int classroom_id = teacher_id; // Each teacher has a designated classroom
     int lessons_taught = 0;
+    int consecutive_timeouts = 0; // Track consecutive timeouts
 
     while (lessons_taught < REQUIRED_LESSONS) {
         log_message(LOG_INFO, "Teacher %d preparing for lesson %d in classroom %d.\n",
@@ -207,6 +209,9 @@ void* teacher_function(void* arg) {
 
         if (!start_with_fewer) {
             // Regular case: wait for enough students
+            int wait_count = 0;
+            int max_waits = 3; // Maximum number of timeout waits before checking conditions
+
             while (classrooms[classroom_id].students_count < MIN_STUDENTS_FOR_LESSON) {
                 // Before waiting, check again if we should start with fewer
                 CHECK_PTHREAD_RETURN(pthread_mutex_lock(&school_mutex),
@@ -214,20 +219,82 @@ void* teacher_function(void* arg) {
 
                 start_with_fewer = (students_in_school < MIN_STUDENTS_FOR_LESSON);
 
+                // Check if there are enough students left in school who haven't attended this teacher's class
+                int available_students = 0;
+                for (int i = 0; i < TOTAL_STUDENTS; i++) {
+                    // For each student in school, check if they're still around and haven't attended this class
+                    if (student_lessons_attended[i] < REQUIRED_LESSONS &&
+                        !student_already_attended_classroom(i, classroom_id, student_lessons_attended[i])) {
+                        available_students++;
+                    }
+                }
+
+                // If not enough eligible students remain for this class, start with fewer
+                if (available_students < MIN_STUDENTS_FOR_LESSON) {
+                    log_message(LOG_INFO, "Teacher %d detected only %d eligible students remain for classroom %d.\n",
+                              teacher_id, available_students, classroom_id);
+                    start_with_fewer = true;
+                }
+
                 CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
                                    "Teacher: school mutex unlock in wait loop");
 
-                if (start_with_fewer) {
-                    break;  // Start with fewer students
+                if (start_with_fewer || wait_count >= max_waits) {
+                    // Start with fewer students after max timeouts or if conditions changed
+                    if (wait_count >= max_waits) {
+                        log_message(LOG_INFO, "Teacher %d timed out %d times waiting for students. Starting with %d students.\n",
+                                  teacher_id, wait_count, classrooms[classroom_id].students_count);
+                    }
+                    break;
                 }
 
                 log_message(LOG_DEBUG, "Teacher %d waiting for students. Current count: %d\n",
                            teacher_id, classrooms[classroom_id].students_count);
 
-                // Temporarily release the classroom lock and wait for students
-                CHECK_PTHREAD_RETURN(pthread_cond_wait(&classrooms[classroom_id].lesson_start_cv,
-                                                    &classrooms[classroom_id].mutex),
-                                    "Teacher: waiting for students");
+                // Use a timed wait to prevent indefinite waiting
+                struct timespec ts;
+                clock_gettime(CLOCK_REALTIME, &ts);
+                ts.tv_sec += WAIT_TIMEOUT_SEC;
+
+                int wait_result = pthread_cond_timedwait(&classrooms[classroom_id].lesson_start_cv,
+                                                      &classrooms[classroom_id].mutex,
+                                                      &ts);
+
+                if (wait_result == ETIMEDOUT) {
+                    wait_count++;
+                    consecutive_timeouts++;
+
+                    log_message(LOG_DEBUG, "Teacher %d timed out waiting for students (timeout #%d).\n",
+                              teacher_id, consecutive_timeouts);
+
+                    // After several consecutive timeouts, broadcast to students
+                    if (consecutive_timeouts >= 2) {
+                        // Temporarily release classroom lock to avoid deadlock
+                        CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&classrooms[classroom_id].mutex),
+                                           "Teacher: temporary classroom mutex unlock");
+
+                        // Get school mutex to broadcast to students
+                        CHECK_PTHREAD_RETURN(pthread_mutex_lock(&school_mutex),
+                                           "Teacher: school mutex lock for broadcast");
+
+                        log_message(LOG_DEBUG, "Teacher %d broadcasting availability after timeouts.\n", teacher_id);
+                        pthread_cond_broadcast(&school_cond);
+
+                        CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
+                                           "Teacher: school mutex unlock after broadcast");
+
+                        // Re-acquire classroom lock
+                        CHECK_PTHREAD_RETURN(pthread_mutex_lock(&classrooms[classroom_id].mutex),
+                                           "Teacher: classroom mutex re-lock");
+                    }
+                } else if (wait_result != 0) {
+                    fprintf(stderr, "Teacher: waiting for students failed: %s\n",
+                            strerror(wait_result));
+                    exit(EXIT_FAILURE);
+                } else {
+                    // Successfully woke up because a student joined
+                    consecutive_timeouts = 0;
+                }
 
                 // We woke up - check if conditions have changed
                 // Signal other waiting students/teachers
@@ -240,6 +307,9 @@ void* teacher_function(void* arg) {
                                    "Teacher: school mutex unlock after wait");
             }
         }
+
+        // Reset timeout counter since we're starting a lesson
+        consecutive_timeouts = 0;
 
         // Start the lesson
         classrooms[classroom_id].state = LESSON_IN_PROGRESS;
@@ -393,9 +463,34 @@ void* student_function(void* arg) {
             CHECK_PTHREAD_RETURN(pthread_mutex_lock(&school_mutex),
                                 "Student: school mutex lock for wait");
 
-            // Instead of busy waiting, wait on the school condition variable
-            // until there's a change in state that might make a classroom available
-            pthread_cond_wait(&school_cond, &school_mutex);
+            // CRITICAL FIX: Check for remaining teachers again before waiting
+            if (remaining_teachers == 0) {
+                // No teachers left, student should leave
+                students_in_school--;
+                log_message(LOG_INFO, "Student %d is leaving because no teachers remain. Lessons attended: %d/%d\n",
+                          student_id, lessons_attended, REQUIRED_LESSONS);
+
+                // Signal teachers about student count change
+                pthread_cond_broadcast(&school_cond);
+
+                CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
+                                    "Student: school mutex unlock (no teachers)");
+                return NULL;
+            }
+
+            // Use a timed wait instead of indefinite wait to prevent deadlock
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_sec += WAIT_TIMEOUT_SEC;
+
+            // Instead of using the macro, handle the return value explicitly
+            int wait_result = pthread_cond_timedwait(&school_cond, &school_mutex, &ts);
+
+            // Only treat non-timeout errors as fatal
+            if (wait_result != 0 && wait_result != ETIMEDOUT) {
+                fprintf(stderr, "Student wait error: %s\n", strerror(wait_result));
+                exit(EXIT_FAILURE);
+            }
 
             CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
                                 "Student: school mutex unlock after wait");
@@ -408,9 +503,26 @@ void* student_function(void* arg) {
 
         // Wait if the lesson hasn't started yet
         while (classrooms[chosen_classroom].state == LESSON_WAITING) {
-            CHECK_PTHREAD_RETURN(pthread_cond_wait(&classrooms[chosen_classroom].lesson_start_cv,
-                                &classrooms[chosen_classroom].mutex),
-                                "Student: waiting for lesson to start");
+            // Use a timed wait to prevent indefinite blocking
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_sec += WAIT_TIMEOUT_SEC;
+
+            int wait_result = pthread_cond_timedwait(
+                &classrooms[chosen_classroom].lesson_start_cv,
+                &classrooms[chosen_classroom].mutex,
+                &ts);
+
+            // Only treat non-timeout errors as fatal
+            if (wait_result != 0 && wait_result != ETIMEDOUT) {
+                fprintf(stderr, "Student lesson start wait error: %s\n", strerror(wait_result));
+                exit(EXIT_FAILURE);
+            }
+
+            // After timeout, check if lesson state has changed or if we need to continue waiting
+            if (classrooms[chosen_classroom].state != LESSON_WAITING) {
+                break;
+            }
         }
 
         // Participate in the lesson
@@ -419,9 +531,26 @@ void* student_function(void* arg) {
 
         // Wait for the lesson to end
         while (classrooms[chosen_classroom].state == LESSON_IN_PROGRESS) {
-            CHECK_PTHREAD_RETURN(pthread_cond_wait(&classrooms[chosen_classroom].lesson_end_cv,
-                                &classrooms[chosen_classroom].mutex),
-                                "Student: waiting for lesson to end");
+            // Use a timed wait to prevent indefinite blocking
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_sec += WAIT_TIMEOUT_SEC;
+
+            int wait_result = pthread_cond_timedwait(
+                &classrooms[chosen_classroom].lesson_end_cv,
+                &classrooms[chosen_classroom].mutex,
+                &ts);
+
+            // Only treat non-timeout errors as fatal
+            if (wait_result != 0 && wait_result != ETIMEDOUT) {
+                fprintf(stderr, "Student lesson end wait error: %s\n", strerror(wait_result));
+                exit(EXIT_FAILURE);
+            }
+
+            // After timeout, check if lesson state has changed or if we need to continue waiting
+            if (classrooms[chosen_classroom].state != LESSON_IN_PROGRESS) {
+                break;
+            }
         }
 
         // Record this lesson
