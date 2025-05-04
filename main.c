@@ -140,18 +140,20 @@ void initialize_classrooms() {
 // Clean up resources
 void cleanup_resources() {
     for (int i = 0; i < NUM_CLASSES; i++) {
-        CHECK_PTHREAD_RETURN(pthread_mutex_destroy(&classrooms[i].mutex),
-                            "Classroom mutex destruction");
+        // FIX: Destroy condition variables before mutexes
         CHECK_PTHREAD_RETURN(pthread_cond_destroy(&classrooms[i].lesson_start_cv),
                             "Classroom start condition destruction");
         CHECK_PTHREAD_RETURN(pthread_cond_destroy(&classrooms[i].lesson_end_cv),
                             "Classroom end condition destruction");
+        CHECK_PTHREAD_RETURN(pthread_mutex_destroy(&classrooms[i].mutex),
+                            "Classroom mutex destruction");
     }
 
-    CHECK_PTHREAD_RETURN(pthread_mutex_destroy(&school_mutex),
-                        "School mutex destruction");
+    // FIX: Destroy condition variable before mutex
     CHECK_PTHREAD_RETURN(pthread_cond_destroy(&school_cond),
                         "School condition variable destruction");
+    CHECK_PTHREAD_RETURN(pthread_mutex_destroy(&school_mutex),
+                        "School mutex destruction");
 }
 
 // Check if there are enough students left in school for a regular lesson
@@ -239,6 +241,9 @@ void* teacher_function(void* arg) {
                               teacher_id, available_students, classroom_id);
                     start_with_fewer = true;
                 }
+
+                // FIX: Always broadcast to waiting students while holding the mutex
+                pthread_cond_broadcast(&school_cond);
 
                 CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
                                    "Teacher: school mutex unlock in wait loop");
@@ -522,6 +527,21 @@ void* student_function(void* arg) {
                 exit(EXIT_FAILURE);
             }
 
+            // FIX: After wait, recheck conditions before continuing
+            if (remaining_teachers == 0) {
+                // No teachers left, student should leave
+                students_in_school--;
+                log_message(LOG_INFO, "Student %d is leaving because no teachers remain. Lessons attended: %d/%d\n",
+                          student_id, lessons_attended, REQUIRED_LESSONS);
+
+                // Signal teachers about student count change
+                pthread_cond_broadcast(&school_cond);
+
+                CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
+                                    "Student: school mutex unlock (no teachers)");
+                return NULL;
+            }
+
             CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&school_mutex),
                                 "Student: school mutex unlock after wait");
             continue;
@@ -549,9 +569,22 @@ void* student_function(void* arg) {
                 exit(EXIT_FAILURE);
             }
 
-            // After timeout, check if lesson state has changed or if we need to continue waiting
+            // FIX: Recheck conditions every time after wake up
             if (classrooms[chosen_classroom].state != LESSON_WAITING) {
                 break;
+            }
+
+            // FIX: Check if the teacher is still assigned to this classroom
+            if (classrooms[chosen_classroom].teacher_id == -1) {
+                // Teacher left or reset the classroom, student should leave too
+                classrooms[chosen_classroom].students_count--;
+                classrooms[chosen_classroom].students_inside[student_id] = 0;
+
+                CHECK_PTHREAD_RETURN(pthread_mutex_unlock(&classrooms[chosen_classroom].mutex),
+                               "Student: classroom mutex unlock (teacher left)");
+
+                // FIX: Continue outer loop instead of breaking inner loop
+                continue;
             }
         }
 
@@ -577,7 +610,7 @@ void* student_function(void* arg) {
                 exit(EXIT_FAILURE);
             }
 
-            // After timeout, check if lesson state has changed or if we need to continue waiting
+            // FIX: After timeout, check if lesson state has changed
             if (classrooms[chosen_classroom].state != LESSON_IN_PROGRESS) {
                 break;
             }
