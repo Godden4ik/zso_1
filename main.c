@@ -508,7 +508,29 @@ void generate_simulation_stats() {
     }
 }
 
-int main() {
+// The function to run 10 times
+void project_zso() {
+    // Reset global variables for this run
+    students_in_school = TOTAL_STUDENTS;
+    remaining_teachers = NUM_TEACHERS;
+
+    // Reset tracking arrays
+    memset(student_lessons_attended, 0, sizeof(student_lessons_attended));
+    memset(teacher_lessons_taught, 0, sizeof(teacher_lessons_taught));
+
+    // Reset student and teacher lesson history
+    for (int i = 0; i < TOTAL_STUDENTS; i++) {
+        for (int j = 0; j < REQUIRED_LESSONS; j++) {
+            student_lesson_history[i][j] = -1;
+        }
+    }
+
+    for (int i = 0; i < NUM_TEACHERS; i++) {
+        for (int j = 0; j < REQUIRED_LESSONS; j++) {
+            teacher_lesson_history[i][j] = -1;
+        }
+    }
+
     // Initialize resources
     initialize_classrooms();
 
@@ -556,6 +578,15 @@ int main() {
 
     // Clean up
     cleanup_resources();
+}
+
+int main() {
+    // Run the simulation 10 times
+    for (int run = 0; run < 10; run++) {
+        printf("\n===== Starting simulation run %d =====\n", run + 1);
+        project_zso();
+        printf("\n===== Completed simulation run %d =====\n\n", run + 1);
+    }
 
     return 0;
 }
