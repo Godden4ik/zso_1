@@ -10,7 +10,7 @@
 
 // Compilation flags
 // Uncomment to enable debug prints
-//#define DEBUG_PRINT
+#define DEBUG_PRINT
 
 // Uncomment to enable debug delays
 // #define DEBUG_SLEEP
